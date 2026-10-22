@@ -16,10 +16,12 @@ function makeQueue(opts?: {
   client?: ReturnType<typeof vi.fn>
   running?: boolean
   agentIdle?: boolean
+  pauseDrain?: ReturnType<typeof vi.fn>
 }) {
   const client = opts?.client ?? vi.fn().mockReturnValue(null)
   const running = opts?.running ?? true
   const agentIdle = opts?.agentIdle ?? true
+  const pauseDrain = opts?.pauseDrain ?? vi.fn(() => false)
   const pollSignal = vi.fn(() => undefined)
   const wechatFilesDir = vi.fn(() => null)
   const sendUserMessage = vi.fn()
@@ -29,6 +31,7 @@ function makeQueue(opts?: {
     () => client() as any,
     () => running,
     () => agentIdle,
+    () => pauseDrain(),
     () => pollSignal() as any,
     () => wechatFilesDir() as any,
     sendUserMessage,
@@ -96,6 +99,67 @@ describe('MessageQueue — drain protection', () => {
     await queue.drain()
     // Since we're not running, nothing should happen
     expect(queue.pendingInjection).toBeNull()
+  })
+
+  it('always marks injected messages as follow-ups so a concurrent turn can queue them', async () => {
+    const sendText = vi.fn().mockResolvedValue(undefined)
+    const { queue, sendUserMessage } = makeQueue({
+      client: vi.fn(() => ({ startTyping: vi.fn().mockResolvedValue(undefined), sendText })),
+      agentIdle: true,
+    })
+
+    queue.queue.push({
+      id: 'queued_1',
+      userId: 'user_1',
+      messageId: 'msg_1',
+      receivedAt: new Date(),
+      text: 'hello',
+      preview: 'hello',
+      contextToken: 'token_1',
+    })
+
+    await queue.drain()
+
+    expect(sendUserMessage).toHaveBeenCalledWith(
+      '【微信消息】\nhello',
+      { deliverAs: 'followUp' },
+    )
+  })
+
+  it('holds messages while the runtime is settling, then drains them as a new WeChat turn', async () => {
+    let settling = true
+    const sendText = vi.fn().mockResolvedValue(undefined)
+    const { queue, sendUserMessage } = makeQueue({
+      client: vi.fn(() => ({ startTyping: vi.fn().mockResolvedValue(undefined), sendText })),
+      agentIdle: true,
+      pauseDrain: vi.fn(() => settling),
+    })
+
+    queue.queue.push({
+      id: 'queued_1',
+      userId: 'user_1',
+      messageId: 'msg_1',
+      receivedAt: new Date(),
+      text: 'hello',
+      preview: 'hello',
+      contextToken: 'token_1',
+    })
+
+    await queue.drain()
+
+    expect(queue.pending).toBe(1)
+    expect(queue.pendingInjection).toBeNull()
+    expect(sendUserMessage).not.toHaveBeenCalled()
+
+    settling = false
+    await queue.drain()
+
+    expect(queue.pending).toBe(0)
+    expect(queue.pendingInjection?.messageId).toBe('msg_1')
+    expect(sendUserMessage).toHaveBeenCalledWith(
+      '【微信消息】\nhello',
+      { deliverAs: 'followUp' },
+    )
   })
 })
 

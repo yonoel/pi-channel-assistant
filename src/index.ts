@@ -129,6 +129,8 @@ export default function wechatAssistant(pi: ExtensionAPI) {
   let client: WeixinClient | null = null
   let running = false
   let agentIdle = true
+  let agentSettling = false
+  let settlementGeneration = 0
   let pollAbort: AbortController | null = null
   let latestCtx: Ctx | null = null
   let wechatFilesDir: string | null = null
@@ -144,6 +146,7 @@ export default function wechatAssistant(pi: ExtensionAPI) {
     () => client,
     () => running,
     () => agentIdle,
+    () => agentSettling,
     () => pollAbort?.signal,
     () => wechatFilesDir,
     (content, opts) => pi.sendUserMessage(content as any, opts),
@@ -218,6 +221,8 @@ export default function wechatAssistant(pi: ExtensionAPI) {
 
   async function stopBridge(options: { releaseLock?: boolean } = {}): Promise<void> {
     running = false
+    agentSettling = false
+    settlementGeneration++
     pollAbort?.abort()
     pollAbort = null
 
@@ -516,6 +521,9 @@ export default function wechatAssistant(pi: ExtensionAPI) {
 
   // agent 开始 → 记录 turn 元数据
   pi.on('agent_start', async (_event, ctx) => {
+    const hadSettlingMessages = agentSettling
+    agentSettling = false
+    settlementGeneration++
     turn.seq++
     latestCtx = ctx
     agentIdle = false
@@ -537,6 +545,7 @@ export default function wechatAssistant(pi: ExtensionAPI) {
       turn.targetUser = queue.lastWechatUser?.userId ?? null
       log(`[AGENT-START] turn#${turn.seq} source=TUI targetUser=${turn.targetUser ?? 'null'}`)
     }
+    if (hadSettlingMessages) setImmediate(() => void queue.drain())
   })
 
   // 首个工具调用时给微信简短进度，避免暴露命令、路径或工具参数。
@@ -555,6 +564,8 @@ export default function wechatAssistant(pi: ExtensionAPI) {
   pi.on('agent_end', async (event, ctx) => {
     latestCtx = ctx
     agentIdle = true
+    agentSettling = true
+    const settlement = ++settlementGeneration
     turn.ended = true
     turn.messages = event.messages as Array<{ role?: string; content?: unknown }>
 
@@ -586,8 +597,25 @@ export default function wechatAssistant(pi: ExtensionAPI) {
     }
     updateStatusBar()
 
-    log(`[AGENT-END-DEFER] deferring drainQueue`)
-    setImmediate(() => void queue.drain())
+    // Pi reports agent_end before its runtime-owned streaming state is fully
+    // settled. Hold incoming messages in our queue until ctx.isIdle() agrees;
+    // otherwise a follow-up can be queued after Pi has already stopped polling
+    // follow-ups, or a new turn can be misclassified as TUI traffic.
+    const drainWhenRuntimeIdle = (): void => {
+      if (settlement !== settlementGeneration) return
+      if (!running) {
+        agentSettling = false
+        return
+      }
+      if (!ctx.isIdle()) {
+        setTimeout(drainWhenRuntimeIdle, 10)
+        return
+      }
+      agentSettling = false
+      log(`[AGENT-END-DRAIN] runtime idle, draining queued messages`)
+      void queue.drain()
+    }
+    setTimeout(drainWhenRuntimeIdle, 0)
   })
 
   // 会话关闭 → 清理 + 落盘 context tokens

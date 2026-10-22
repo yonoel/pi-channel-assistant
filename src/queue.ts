@@ -104,6 +104,7 @@ export class MessageQueue {
     private readonly getClient: () => WeixinClient | null,
     private readonly isRunning: () => boolean,
     private readonly getAgentIdle: () => boolean,
+    private readonly shouldPauseDrain: () => boolean,
     private readonly getPollSignal: () => AbortSignal | undefined,
     private readonly getWechatFilesDir: () => string | null,
     private readonly sendUserMessage: (
@@ -275,6 +276,7 @@ export class MessageQueue {
 
     log(`[DRAIN-ENTER] running=${this.isRunning()} client=${!!client} queue=${this.queue.length} pendingInjection=${!!this.pendingInjection} activeRequest=${!!this.activeRequest} agentIdle=${this.getAgentIdle()} batchTimer=${!!this.batchTimer}`)
     if (!this.isRunning() || !client) { log(`[DRAIN-SKIP] not running or no client`); return }
+    if (this.shouldPauseDrain()) { log(`[DRAIN-SKIP] agent runtime is settling`); return }
     if (this.pendingInjection) { log(`[DRAIN-SKIP] pendingInjection already set`); return }
     if (this.batchTimer) { log(`[DRAIN-SKIP] 图片批处理计时器运行中`); return }
     if (this.queue.length === 0) { log(`[DRAIN-SKIP] queue empty`); return }
@@ -346,8 +348,8 @@ export class MessageQueue {
       const combinedText = texts.join('\n') + fileNote
       const content: Array<{ type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string }> = [{ type: 'text', text: `${source}\n${combinedText}` }]
       for (const img of images) content.push({ type: 'image', data: img.data, mimeType: img.mediaType })
-      const deliverOpts = isBusy ? { deliverAs: 'followUp' as const } : undefined
-      log(`[DRAIN-SEND] file+text, files=${files.length}, images=${images.length}, mode=${deliverOpts?.deliverAs ?? 'direct'}`)
+      const deliverOpts = { deliverAs: 'followUp' as const }
+      log(`[DRAIN-SEND] file+text, files=${files.length}, images=${images.length}, mode=${deliverOpts.deliverAs}`)
       this.sendUserMessage(content, deliverOpts)
     } else if (hasImages) {
       const content: Array<{ type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string }> = []
@@ -357,12 +359,12 @@ export class MessageQueue {
         content.push({ type: 'text', text: `${source}\n${texts.join('\n')}` })
       }
       for (const img of images) content.push({ type: 'image', data: img.data, mimeType: img.mediaType })
-      const deliverOpts = isBusy ? { deliverAs: 'followUp' as const } : undefined
-      log(`[DRAIN-SEND] image+text, images=${images.length}, mode=${deliverOpts?.deliverAs ?? 'direct'}`)
+      const deliverOpts = { deliverAs: 'followUp' as const }
+      log(`[DRAIN-SEND] image+text, images=${images.length}, mode=${deliverOpts.deliverAs}`)
       this.sendUserMessage(content, deliverOpts)
     } else if (hasText) {
-      const deliverOpts = isBusy ? { deliverAs: 'followUp' as const } : undefined
-      log(`[DRAIN-SEND] text, text=${texts.join(' ').slice(0, 80)}, mode=${deliverOpts?.deliverAs ?? 'direct'}`)
+      const deliverOpts = { deliverAs: 'followUp' as const }
+      log(`[DRAIN-SEND] text, text=${texts.join(' ').slice(0, 80)}, mode=${deliverOpts.deliverAs}`)
       this.sendUserMessage(`${source}\n${texts.join('\n')}`, deliverOpts)
     } else {
       if (hadImageMessages) {
