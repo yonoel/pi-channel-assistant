@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- 微信消息始终按 follow-up 投递，并在 Pi runtime 收尾期间暂停注入，避免竞态导致通道阻塞或消息路由错误
+
 ## [0.4.0] - 2026-09-02
 
 ### Changed
